@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Streamlit
+.streamlit/
+
+# Local DB / exports
+job_search_tracker.db
+*.csv
+
+# OS
+.DS_Store
+Thumbs.db
+.vscode/settings.json
