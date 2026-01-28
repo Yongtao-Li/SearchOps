@@ -61,9 +61,56 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS networking_contacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            company TEXT,
+            title TEXT,
+            relationship_type TEXT NOT NULL,
+            source TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'New',
+            tags TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS networking_interactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contact_id INTEGER NOT NULL,
+            interaction_date TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            interaction_type TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            duration_minutes INTEGER NOT NULL DEFAULT 0,
+            summary TEXT,
+            next_step TEXT,
+            follow_up_date TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (contact_id) REFERENCES networking_contacts(id) ON DELETE CASCADE
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS networking_scripts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            char_limit INTEGER,
+            is_default INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+    conn.execute(
         "INSERT OR IGNORE INTO settings (id, weekly_hours, target_actions_per_day) VALUES (1, 30, 5);"
     )
     conn.commit()
+    seed_networking_scripts(conn)
 
 
 def load_settings(conn: sqlite3.Connection) -> Tuple[float, int]:
@@ -77,6 +124,54 @@ def save_settings(conn: sqlite3.Connection, weekly_hours: float, target_actions_
     conn.execute(
         "UPDATE settings SET weekly_hours = ?, target_actions_per_day = ? WHERE id = 1;",
         (float(weekly_hours), int(target_actions_per_day)),
+    )
+    conn.commit()
+
+
+def seed_networking_scripts(conn: sqlite3.Connection) -> None:
+    existing = conn.execute("SELECT COUNT(1) FROM networking_scripts;").fetchone()[0]
+    if int(existing) > 0:
+        return
+    seeds = [
+        (
+            "Ask - Unknown",
+            "Intro + 20-min ask",
+            "Hi [Name], I came across your profile while researching [Company/Topic]. I appreciate your work on [specific]. I am exploring [goal] and would value 2-3 quick questions about your experience. Would you be open to a 15-20 minute call next week?",
+            None,
+            1,
+        ),
+        (
+            "Ask - Warm Referral",
+            "Referral ask",
+            "Hi [Name], [Referrer] suggested I reach out. I am exploring [industry/role] and would appreciate your perspective on [Company/Topic]. If you are open to it, could we connect for 15-20 minutes? Happy to work around your schedule.",
+            None,
+            1,
+        ),
+        (
+            "Ask - Recent Contact",
+            "Event follow-up ask",
+            "Hi [Name], it was great meeting you at [Event]. I enjoyed our conversation about [topic]. If you are open to it, I would love to ask 2-3 questions about your role at [Company]. Would you be available for a brief coffee or call next week?",
+            None,
+            1,
+        ),
+        (
+            "LinkedIn Invite",
+            "Connection request (300 chars)",
+            "Hi [Name], enjoyed your insights on [topic] and noticed we share [commonality]. I would love to connect and stay in touch. Thanks, [Your Name]",
+            300,
+            1,
+        ),
+        (
+            "Follow-up",
+            "Thank you + recap",
+            "Hi [Name], thank you again for your time today. I appreciated your advice on [topic]. As promised, I am sending [resource]. If helpful, I can keep you posted as I progress. Thanks again.",
+            None,
+            1,
+        ),
+    ]
+    conn.executemany(
+        "INSERT INTO networking_scripts (category, title, body, char_limit, is_default) VALUES (?, ?, ?, ?, ?);",
+        seeds,
     )
     conn.commit()
 
@@ -135,6 +230,135 @@ def add_activity(conn: sqlite3.Connection, row: dict) -> None:
     placeholders = ",".join(["?"] * len(row))
     conn.execute(f"INSERT INTO activity_log ({cols}) VALUES ({placeholders});", list(row.values()))
     conn.commit()
+
+
+def add_contact(conn: sqlite3.Connection, row: dict) -> None:
+    cols = ",".join(row.keys())
+    placeholders = ",".join(["?"] * len(row))
+    conn.execute(f"INSERT INTO networking_contacts ({cols}) VALUES ({placeholders});", list(row.values()))
+    conn.commit()
+
+
+def update_contact(conn: sqlite3.Connection, contact_id: int, row: dict) -> None:
+    assignments = ",".join([f"{k} = ?" for k in row.keys()])
+    conn.execute(
+        f"UPDATE networking_contacts SET {assignments} WHERE id = ?;",
+        list(row.values()) + [int(contact_id)],
+    )
+    conn.commit()
+
+
+def get_contacts_df(conn: sqlite3.Connection) -> pd.DataFrame:
+    df = pd.read_sql_query(
+        """
+        SELECT id, name, company, title, relationship_type, source, status, tags, notes, created_at
+        FROM networking_contacts
+        ORDER BY status ASC, created_at DESC;
+        """,
+        conn,
+    )
+    return df
+
+
+def get_contact_row(conn: sqlite3.Connection, contact_id: int) -> pd.Series | None:
+    df = pd.read_sql_query(
+        """
+        SELECT id, name, company, title, relationship_type, source, status, tags, notes
+        FROM networking_contacts
+        WHERE id = ?;
+        """,
+        conn,
+        params=(int(contact_id),),
+    )
+    if df.empty:
+        return None
+    return df.iloc[0]
+
+
+def add_interaction(conn: sqlite3.Connection, row: dict) -> None:
+    cols = ",".join(row.keys())
+    placeholders = ",".join(["?"] * len(row))
+    conn.execute(f"INSERT INTO networking_interactions ({cols}) VALUES ({placeholders});", list(row.values()))
+    conn.commit()
+
+
+def update_interaction(conn: sqlite3.Connection, interaction_id: int, row: dict) -> None:
+    assignments = ",".join([f"{k} = ?" for k in row.keys()])
+    conn.execute(
+        f"UPDATE networking_interactions SET {assignments} WHERE id = ?;",
+        list(row.values()) + [int(interaction_id)],
+    )
+    conn.commit()
+
+
+def get_interactions_df(
+    conn: sqlite3.Connection,
+    start: date | None = None,
+    end: date | None = None,
+    contact_id: int | None = None,
+) -> pd.DataFrame:
+    where = []
+    params = []
+    if start is not None and end is not None:
+        where.append("interaction_date >= ? AND interaction_date <= ?")
+        params.extend([start.isoformat(), end.isoformat()])
+    if contact_id is not None:
+        where.append("contact_id = ?")
+        params.append(int(contact_id))
+    clause = " WHERE " + " AND ".join(where) if where else ""
+    df = pd.read_sql_query(
+        f"""
+        SELECT i.id, i.contact_id, c.name, c.company, i.interaction_date, i.mode,
+               i.interaction_type, i.outcome, i.duration_minutes, i.follow_up_date, i.next_step
+        FROM networking_interactions i
+        JOIN networking_contacts c ON c.id = i.contact_id
+        {clause}
+        ORDER BY i.interaction_date DESC, i.id DESC;
+        """,
+        conn,
+        params=params,
+    )
+    return df
+
+
+def get_interaction_row(conn: sqlite3.Connection, interaction_id: int) -> pd.Series | None:
+    df = pd.read_sql_query(
+        """
+        SELECT id, contact_id, interaction_date, mode, interaction_type, outcome,
+               duration_minutes, summary, next_step, follow_up_date
+        FROM networking_interactions
+        WHERE id = ?;
+        """,
+        conn,
+        params=(int(interaction_id),),
+    )
+    if df.empty:
+        return None
+    return df.iloc[0]
+
+
+def get_followups_df(conn: sqlite3.Connection, on_or_before: date) -> pd.DataFrame:
+    df = pd.read_sql_query(
+        """
+        SELECT i.id, i.contact_id, c.name, c.company, i.interaction_date,
+               i.follow_up_date, i.next_step, i.outcome
+        FROM networking_interactions i
+        JOIN networking_contacts c ON c.id = i.contact_id
+        WHERE i.follow_up_date IS NOT NULL AND i.follow_up_date <= ?
+        ORDER BY i.follow_up_date ASC, i.id DESC;
+        """,
+        conn,
+        params=(on_or_before.isoformat(),),
+    )
+    return df
+
+
+def get_scripts_df(conn: sqlite3.Connection) -> pd.DataFrame:
+    df = pd.read_sql_query(
+        "SELECT id, category, title, body, char_limit FROM networking_scripts ORDER BY category, title;",
+        conn,
+    )
+    return df
 
 def delete_activity(conn: sqlite3.Connection, activity_id: int) -> None:
     conn.execute("DELETE FROM activity_log WHERE id = ?;", (int(activity_id),))
@@ -196,7 +420,7 @@ def main() -> None:
     target_planning = weekly_hours * 0.20
     target_applying = weekly_hours * 0.10
 
-    tabs = st.tabs(["Log Activity", "Targets (5×5×7)", "Dashboard", "Export / Import"])
+    tabs = st.tabs(["Log Activity", "Targets (5×5×7)", "Dashboard", "Networking", "Export / Import"])
 
     # --- Log Activity
     with tabs[0]:
@@ -407,12 +631,425 @@ def main() -> None:
             st.dataframe(pd.DataFrame([kpis]).T.rename(columns={0: "Total"}), use_container_width=True)
 
             st.markdown("---")
+            st.markdown("**Networking CRM (weekly)**")
+            df_net_week = get_interactions_df(conn, wk_start, wk_end)
+            if df_net_week.empty:
+                st.info("No networking interactions logged this week.")
+            else:
+                outreach_count = int((df_net_week["interaction_type"] == "Outreach").sum())
+                meetings_count = int((df_net_week["interaction_type"] == "Meeting").sum())
+                referrals = int((df_net_week["interaction_type"] == "Referral Received").sum())
+                n1, n2, n3 = st.columns(3)
+                n1.metric("Outreach", outreach_count)
+                n2.metric("Meetings", meetings_count)
+                n3.metric("Referrals received", referrals)
+
+            st.markdown("---")
             st.markdown("**Channel mix (hours by channel)**")
             ch = df_week.groupby("channel")["hours"].sum().sort_values(ascending=False)
             st.dataframe(ch.reset_index().rename(columns={"hours": "hours"}), use_container_width=True, hide_index=True)
 
-    # --- Export / Import
+    # --- Networking
     with tabs[3]:
+        st.subheader("Networking CRM")
+        contact_types = [
+            "Referrer",
+            "Target Company",
+            "Alumni",
+            "Recruiter",
+            "Hiring Manager",
+            "Peer",
+            "Mentor",
+            "Event Organizer",
+            "Consultant",
+            "Reporter",
+            "Other",
+        ]
+        sources = ["LinkedIn", "Event", "Referral", "Email", "Cold Outreach", "Internal", "Other"]
+        statuses = ["New", "Active", "Dormant", "Closed"]
+        modes = ["Email", "LinkedIn", "Phone", "Video", "In-person", "Chat"]
+        interaction_types = [
+            "Outreach",
+            "Meeting",
+            "Follow-up",
+            "Referral Request",
+            "Referral Received",
+            "Thank You",
+            "Other",
+        ]
+        outcomes = ["No Response", "Replied", "Meeting Scheduled", "Met", "Referral Made", "Declined", "Other"]
+
+        st.markdown("**Add contact**")
+        add_left, add_right = st.columns(2)
+        with add_left:
+            nc_name = st.text_input("Name", key="nc_name")
+            nc_company = st.text_input("Company", key="nc_company")
+            nc_type = st.selectbox("Relationship type", contact_types, key="nc_type")
+            nc_status = st.selectbox("Status", statuses, index=0, key="nc_status")
+        with add_right:
+            nc_title = st.text_input("Title", key="nc_title")
+            nc_source = st.selectbox("Source", sources, key="nc_source")
+            nc_tags = st.text_input("Tags (comma-separated)", key="nc_tags")
+        nc_notes = st.text_area("Notes", key="nc_notes", height=80)
+        if st.button("Add contact"):
+            if not nc_name.strip():
+                st.error("Please enter a contact name.")
+            else:
+                add_contact(
+                    conn,
+                    {
+                        "name": nc_name.strip(),
+                        "company": nc_company.strip(),
+                        "title": nc_title.strip(),
+                        "relationship_type": nc_type,
+                        "source": nc_source,
+                        "status": nc_status,
+                        "tags": nc_tags.strip(),
+                        "notes": nc_notes.strip(),
+                        "created_at": datetime.now().isoformat(timespec="seconds"),
+                    },
+                )
+                st.success("Contact added.")
+
+        df_contacts = get_contacts_df(conn)
+
+        st.markdown("---")
+        st.markdown("**Review contacts**")
+        if df_contacts.empty:
+            st.info("No contacts yet. Add a few to start tracking.")
+            filtered_contacts = df_contacts
+        else:
+            f1, f2, f3, f4 = st.columns([1, 1, 1, 2])
+            with f1:
+                status_filter = st.selectbox("Status", ["All"] + statuses, key="nc_filter_status")
+            with f2:
+                type_filter = st.selectbox("Type", ["All"] + contact_types, key="nc_filter_type")
+            with f3:
+                source_filter = st.selectbox("Source", ["All"] + sources, key="nc_filter_source")
+            with f4:
+                search_filter = st.text_input("Search name/company", key="nc_filter_search")
+
+            filtered_contacts = df_contacts.copy()
+            if status_filter != "All":
+                filtered_contacts = filtered_contacts[filtered_contacts["status"] == status_filter]
+            if type_filter != "All":
+                filtered_contacts = filtered_contacts[filtered_contacts["relationship_type"] == type_filter]
+            if source_filter != "All":
+                filtered_contacts = filtered_contacts[filtered_contacts["source"] == source_filter]
+            if search_filter.strip():
+                pattern = search_filter.strip().lower()
+                filtered_contacts = filtered_contacts[
+                    filtered_contacts.apply(
+                        lambda r: pattern in (r["name"] or "").lower()
+                        or pattern in (r["company"] or "").lower(),
+                        axis=1,
+                    )
+                ]
+
+            if filtered_contacts.empty:
+                st.info("No contacts match these filters.")
+            else:
+                st.dataframe(
+                    filtered_contacts[
+                        ["id", "name", "company", "title", "relationship_type", "source", "status"]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        st.markdown("---")
+        st.markdown("**Update contact**")
+        if df_contacts.empty:
+            st.info("No contacts to update yet.")
+        else:
+            update_contacts = filtered_contacts if not filtered_contacts.empty else df_contacts
+            contact_ids = update_contacts["id"].tolist()
+            chosen_contact = st.selectbox("Contact ID", contact_ids, key="nc_update_contact_id")
+            crow = get_contact_row(conn, int(chosen_contact))
+            if crow is None:
+                st.error("Contact not found.")
+            else:
+                if st.session_state.get("nc_update_last_id") != chosen_contact:
+                    st.session_state["nc_update_last_id"] = chosen_contact
+                    st.session_state["nc_update_name"] = crow["name"]
+                    st.session_state["nc_update_company"] = crow.get("company", "") or ""
+                    st.session_state["nc_update_title"] = crow.get("title", "") or ""
+                    st.session_state["nc_update_type"] = crow["relationship_type"]
+                    st.session_state["nc_update_source"] = crow["source"]
+                    st.session_state["nc_update_status"] = crow["status"]
+                    st.session_state["nc_update_tags"] = crow.get("tags", "") or ""
+                    st.session_state["nc_update_notes"] = crow.get("notes", "") or ""
+
+                update_left, update_right = st.columns(2)
+                with update_left:
+                    uc_name = st.text_input("Name", key="nc_update_name")
+                    uc_company = st.text_input("Company", key="nc_update_company")
+                    uc_type = st.selectbox(
+                        "Relationship type",
+                        contact_types,
+                        index=contact_types.index(st.session_state["nc_update_type"]),
+                        key="nc_update_type",
+                    )
+                    uc_status = st.selectbox(
+                        "Status",
+                        statuses,
+                        index=statuses.index(st.session_state["nc_update_status"]),
+                        key="nc_update_status",
+                    )
+                with update_right:
+                    uc_title = st.text_input("Title", key="nc_update_title")
+                    uc_source = st.selectbox(
+                        "Source",
+                        sources,
+                        index=sources.index(st.session_state["nc_update_source"]),
+                        key="nc_update_source",
+                    )
+                    uc_tags = st.text_input("Tags (comma-separated)", key="nc_update_tags")
+                uc_notes = st.text_area("Notes", key="nc_update_notes", height=80)
+
+                if st.button("Save contact update"):
+                    if not uc_name.strip():
+                        st.error("Please enter a contact name.")
+                    else:
+                        update_contact(
+                            conn,
+                            int(chosen_contact),
+                            {
+                                "name": uc_name.strip(),
+                                "company": uc_company.strip(),
+                                "title": uc_title.strip(),
+                                "relationship_type": uc_type,
+                                "source": uc_source,
+                                "status": uc_status,
+                                "tags": uc_tags.strip(),
+                                "notes": uc_notes.strip(),
+                            },
+                        )
+                        st.success("Contact updated.")
+
+        contact_label = []
+        contact_map = {}
+        if not df_contacts.empty:
+            contact_label = df_contacts.apply(
+                lambda r: f"{r['name']} ({r['company'] or 'N/A'})", axis=1
+            ).tolist()
+            contact_map = dict(zip(contact_label, df_contacts["id"].tolist()))
+
+        st.markdown("---")
+        st.markdown("**Log interaction**")
+        if df_contacts.empty:
+            st.info("Add a contact before logging interactions.")
+        else:
+            ic1, ic2, ic3, ic4 = st.columns([1, 1, 1, 2])
+            with ic1:
+                interaction_date = st.date_input("Date", value=today, key="ni_date")
+                duration_minutes = st.number_input("Duration (minutes)", min_value=0, value=15, step=5)
+            with ic2:
+                chosen_label = st.selectbox("Contact", contact_label)
+                mode = st.selectbox("Mode", modes)
+            with ic3:
+                interaction_type = st.selectbox("Type", interaction_types)
+                outcome = st.selectbox("Outcome", outcomes)
+            with ic4:
+                summary = st.text_area("Summary", height=80)
+                next_step = st.text_input("Next step")
+                follow_up_date = st.date_input("Follow-up date", value=today, key="ni_followup")
+                no_followup = st.checkbox("No follow-up needed", value=False)
+
+            if st.button("Add interaction"):
+                add_interaction(
+                    conn,
+                    {
+                        "contact_id": int(contact_map[chosen_label]),
+                        "interaction_date": interaction_date.isoformat(),
+                        "mode": mode,
+                        "interaction_type": interaction_type,
+                        "outcome": outcome,
+                        "duration_minutes": int(duration_minutes),
+                        "summary": summary.strip(),
+                        "next_step": next_step.strip(),
+                        "follow_up_date": None if no_followup else follow_up_date.isoformat(),
+                        "created_at": datetime.now().isoformat(timespec="seconds"),
+                    },
+                )
+                st.success("Interaction logged.")
+
+        st.markdown("---")
+        st.markdown("**Review/update interactions**")
+        if df_contacts.empty:
+            st.info("Add a contact before reviewing interactions.")
+        else:
+            r1, r2, r3 = st.columns([1, 1, 2])
+            with r1:
+                review_start = st.date_input("From", value=wk_start, key="ni_review_start")
+            with r2:
+                review_end = st.date_input("To", value=wk_end, key="ni_review_end")
+            with r3:
+                contact_filter = st.selectbox(
+                    "Filter by contact (optional)",
+                    ["All"] + contact_label,
+                    key="ni_contact_filter",
+                )
+
+            filter_contact_id = None
+            if contact_filter != "All":
+                filter_contact_id = int(contact_map[contact_filter])
+
+            df_interactions = get_interactions_df(conn, review_start, review_end, filter_contact_id)
+            if df_interactions.empty:
+                st.info("No interactions found for this range.")
+            else:
+                st.dataframe(
+                    df_interactions[
+                        [
+                            "id",
+                            "name",
+                            "company",
+                            "interaction_date",
+                            "mode",
+                            "interaction_type",
+                            "outcome",
+                            "duration_minutes",
+                            "follow_up_date",
+                            "next_step",
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.markdown("**Update an interaction**")
+                interaction_ids = df_interactions["id"].tolist()
+                chosen_interaction = st.selectbox("Interaction ID", interaction_ids, key="ni_update_interaction_id")
+                irow = get_interaction_row(conn, int(chosen_interaction))
+                if irow is None:
+                    st.error("Interaction not found.")
+                else:
+                    has_followup = irow.get("follow_up_date") is not None
+                    followup_value = (
+                        pd.to_datetime(irow["follow_up_date"]).date() if has_followup else today
+                    )
+                    contact_id = int(irow["contact_id"])
+                    contact_index = df_contacts.index[df_contacts["id"] == contact_id][0]
+                    update_contact_label = contact_label[contact_index]
+
+                    if st.session_state.get("ni_update_last_id") != chosen_interaction:
+                        st.session_state["ni_update_last_id"] = chosen_interaction
+                        st.session_state["ni_update_date"] = pd.to_datetime(irow["interaction_date"]).date()
+                        st.session_state["ni_update_duration"] = int(irow["duration_minutes"])
+                        st.session_state["ni_update_contact"] = update_contact_label
+                        st.session_state["ni_update_mode"] = irow["mode"]
+                        st.session_state["ni_update_type"] = irow["interaction_type"]
+                        st.session_state["ni_update_outcome"] = irow["outcome"]
+                        st.session_state["ni_update_summary"] = irow.get("summary", "") or ""
+                        st.session_state["ni_update_next_step"] = irow.get("next_step", "") or ""
+                        st.session_state["ni_update_followup"] = followup_value
+                        st.session_state["ni_update_no_followup"] = not has_followup
+
+                    u1, u2, u3, u4 = st.columns([1, 1, 1, 2])
+                    with u1:
+                        ui_date = st.date_input(
+                            "Date",
+                            key="ni_update_date",
+                        )
+                        ui_duration = st.number_input(
+                            "Duration (minutes)",
+                            min_value=0,
+                            step=5,
+                            key="ni_update_duration",
+                        )
+                    with u2:
+                        update_contact_choice = st.selectbox(
+                            "Contact",
+                            contact_label,
+                            index=contact_label.index(update_contact_label),
+                            key="ni_update_contact",
+                        )
+                        ui_mode = st.selectbox(
+                            "Mode",
+                            modes,
+                            index=modes.index(st.session_state["ni_update_mode"]),
+                            key="ni_update_mode",
+                        )
+                    with u3:
+                        ui_type = st.selectbox(
+                            "Type",
+                            interaction_types,
+                            index=interaction_types.index(st.session_state["ni_update_type"]),
+                            key="ni_update_type",
+                        )
+                        ui_outcome = st.selectbox(
+                            "Outcome",
+                            outcomes,
+                            index=outcomes.index(st.session_state["ni_update_outcome"]),
+                            key="ni_update_outcome",
+                        )
+                    with u4:
+                        ui_summary = st.text_area(
+                            "Summary",
+                            height=80,
+                            key="ni_update_summary",
+                        )
+                        ui_next_step = st.text_input(
+                            "Next step",
+                            key="ni_update_next_step",
+                        )
+                        ui_followup_date = st.date_input(
+                            "Follow-up date",
+                            key="ni_update_followup",
+                        )
+                        ui_no_followup = st.checkbox(
+                            "No follow-up needed",
+                            key="ni_update_no_followup",
+                        )
+
+                    if st.button("Save interaction update"):
+                        update_interaction(
+                            conn,
+                            int(chosen_interaction),
+                            {
+                                "contact_id": int(contact_map[update_contact_choice]),
+                                "interaction_date": ui_date.isoformat(),
+                                "mode": ui_mode,
+                                "interaction_type": ui_type,
+                                "outcome": ui_outcome,
+                                "duration_minutes": int(ui_duration),
+                                "summary": ui_summary.strip(),
+                                "next_step": ui_next_step.strip(),
+                                "follow_up_date": None if ui_no_followup else ui_followup_date.isoformat(),
+                            },
+                        )
+                        st.success("Interaction updated.")
+
+        st.markdown("---")
+        st.markdown("**Follow-ups due**")
+        followup_cutoff = st.date_input("Show follow-ups due on or before", value=today, key="followup_cutoff")
+        df_followups = get_followups_df(conn, followup_cutoff)
+        if df_followups.empty:
+            st.info("No follow-ups due.")
+        else:
+            st.dataframe(
+                df_followups[["id", "name", "company", "interaction_date", "follow_up_date", "next_step"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.markdown("---")
+        st.markdown("**Networking scripts library**")
+        df_scripts = get_scripts_df(conn)
+        if df_scripts.empty:
+            st.info("No scripts available.")
+        else:
+            script_labels = df_scripts.apply(lambda r: f"{r['category']} - {r['title']}", axis=1).tolist()
+            script_map = dict(zip(script_labels, df_scripts.index.tolist()))
+            chosen_script = st.selectbox("Script", script_labels)
+            srow = df_scripts.loc[script_map[chosen_script]]
+            st.text_area("Template", value=srow["body"], height=160)
+            if pd.notna(srow.get("char_limit")):
+                st.caption(f"Character limit: {int(srow['char_limit'])}")
+
+    # --- Export / Import
+    with tabs[4]:
         st.subheader("Export / Import")
         df_targets = get_targets_df(conn)
         df_week = get_activity_df(conn, wk_start, wk_end)
@@ -438,6 +1075,29 @@ def main() -> None:
             else:
                 csv2 = df_targets.to_csv(index=False).encode("utf-8")
                 st.download_button("Download targets CSV", data=csv2, file_name="targets.csv", mime="text/csv")
+
+        st.markdown("---")
+        st.markdown("**Export networking contacts & interactions (CSV)**")
+        df_contacts = get_contacts_df(conn)
+        df_interactions = get_interactions_df(conn)
+        c1, c2 = st.columns(2)
+        with c1:
+            if df_contacts.empty:
+                st.info("No contacts to export.")
+            else:
+                csvc = df_contacts.to_csv(index=False).encode("utf-8")
+                st.download_button("Download contacts CSV", data=csvc, file_name="networking_contacts.csv", mime="text/csv")
+        with c2:
+            if df_interactions.empty:
+                st.info("No interactions to export.")
+            else:
+                csvi = df_interactions.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Download interactions CSV",
+                    data=csvi,
+                    file_name="networking_interactions.csv",
+                    mime="text/csv",
+                )
 
         st.markdown("---")
         st.subheader("Import activities (append)")
